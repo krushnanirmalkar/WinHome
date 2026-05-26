@@ -22,45 +22,69 @@ namespace WinHome.Services.System
         public StateData LoadState()
         {
             if (!File.Exists(_stateFilePath)) return new StateData();
+
+            string json;
             try
             {
                 // Use FileShare.ReadWrite to allow reading even if we are writing (though we lock on write)
                 using var stream = File.Open(_stateFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
                 using var reader = new StreamReader(stream);
-                string json = reader.ReadToEnd();
-
-                // Try to deserialize as new StateData format
-                try
-                {
-                    var stateData = JsonSerializer.Deserialize<StateData>(json);
-                    if (stateData != null) return stateData;
-                }
-                catch
-                {
-                    // Fall through to backward compatibility
-                }
-
-                // Backward compatibility: try to deserialize as old HashSet<string> format
-                try
-                {
-                    var legacyState = JsonSerializer.Deserialize<HashSet<string>>(json);
-                    if (legacyState != null)
-                    {
-                        return new StateData { AppliedItems = legacyState };
-                    }
-                }
-                catch
-                {
-                    // Fall through
-                }
-
-                return new StateData();
+                json = reader.ReadToEnd();
             }
             catch (Exception ex)
             {
-                _logger.LogWarning($"[State] Could not load state: {ex.Message}");
+                _logger.LogWarning($"[State] Could not read state file '{_stateFilePath}': {ex.Message}");
                 return new StateData();
             }
+
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return new StateData();
+            }
+
+            // Try to deserialize as new StateData format
+            try
+            {
+                var stateData = JsonSerializer.Deserialize<StateData>(json);
+                if (stateData != null) return stateData;
+            }
+            catch (JsonException)
+            {
+                // Fall through to backward compatibility
+            }
+
+            // Backward compatibility: try to deserialize as old HashSet<string> format
+            try
+            {
+                var legacyState = JsonSerializer.Deserialize<HashSet<string>>(json);
+                if (legacyState != null)
+                {
+                    return new StateData { AppliedItems = legacyState };
+                }
+            }
+            catch (JsonException ex)
+            {
+                var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
+                var backupSuffix = Path.GetRandomFileName();
+                var backupPath = $"{_stateFilePath}.corrupted.{timestamp}.{backupSuffix}";
+
+                _logger.LogWarning(
+                    $"[State] State file '{_stateFilePath}' is corrupted: {ex.Message}. " +
+                    $"Backing up to '{backupPath}' and starting with empty state.");
+
+                try
+                {
+                    File.Move(_stateFilePath, backupPath);
+                }
+                catch (Exception moveEx)
+                {
+                    _logger.LogWarning($"[State] Could not back up corrupted state file: {moveEx.Message}");
+                }
+
+                return new StateData();
+            }
+
+            return new StateData();
         }
 
         public void SaveState(StateData state)
@@ -105,10 +129,15 @@ namespace WinHome.Services.System
             try
             {
                 string json = JsonSerializer.Serialize(_inMemoryState, new JsonSerializerOptions { WriteIndented = true });
-                // Use FileShare.Read to prevent others from writing but allow reading
-                using var stream = File.Open(_stateFilePath, FileMode.Create, FileAccess.Write, FileShare.Read);
-                using var writer = new StreamWriter(stream);
-                writer.Write(json);
+                string tmpPath = _stateFilePath + ".tmp";
+
+                using (var stream = File.Open(tmpPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                using (var writer = new StreamWriter(stream))
+                {
+                    writer.Write(json);
+                }
+
+                File.Move(tmpPath, _stateFilePath, overwrite: true);
             }
             catch (Exception ex)
             {
