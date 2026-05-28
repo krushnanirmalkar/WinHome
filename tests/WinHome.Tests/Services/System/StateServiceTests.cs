@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using Moq;
 using WinHome.Interfaces;
 using WinHome.Services.System;
@@ -151,14 +153,34 @@ namespace WinHome.Tests.Services.System
         {
             File.WriteAllText(_stateFilePath, "{ invalid json");
 
-            // Lock the file to force File.Move to throw an exception
-            using var lockStream = new FileStream(_stateFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var directoryInfo = new DirectoryInfo(_testDir);
+            var directorySecurity = directoryInfo.GetAccessControl();
+            var currentUser = WindowsIdentity.GetCurrent().User!;
+            var denyWriteRule = new FileSystemAccessRule(
+                currentUser,
+                FileSystemRights.CreateFiles | FileSystemRights.WriteData | FileSystemRights.AppendData | FileSystemRights.Write,
+                InheritanceFlags.ContainerInherit,
+                PropagationFlags.None,
+                AccessControlType.Deny);
 
-            var svc = CreateService();
-            var state = svc.LoadState();
+            directorySecurity.AddAccessRule(denyWriteRule);
+            directoryInfo.SetAccessControl(directorySecurity);
 
-            Assert.Empty(state.AppliedItems);
-            _mockLogger.Verify(l => l.LogWarning(It.Is<string>(s => s.Contains("Could not back up corrupted state file"))), Times.AtLeastOnce);
+            try
+            {
+                var svc = CreateService();
+                var state = svc.LoadState();
+
+                Assert.Empty(state.AppliedItems);
+                Assert.False(File.Exists(_stateFilePath));
+                _mockLogger.Verify(l => l.LogWarning(It.Is<string>(s => s.Contains("Could not back up corrupted state file"))), Times.AtLeastOnce);
+            }
+            finally
+            {
+                var restoreSecurity = directoryInfo.GetAccessControl();
+                restoreSecurity.RemoveAccessRuleSpecific(denyWriteRule);
+                directoryInfo.SetAccessControl(restoreSecurity);
+            }
         }
 
         [Fact]

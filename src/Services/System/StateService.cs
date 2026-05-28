@@ -76,11 +76,23 @@ namespace WinHome.Services.System
 
                 try
                 {
-                    File.Move(_stateFilePath, backupPath);
+                    File.Copy(_stateFilePath, backupPath, true);
                 }
-                catch (Exception moveEx)
+                catch (Exception copyEx)
                 {
-                    _logger.LogWarning($"[State] Could not back up corrupted state file: {moveEx.Message}");
+                    _logger.LogWarning($"[State] Could not back up corrupted state file: {copyEx.Message}");
+                }
+
+                try
+                {
+                    if (File.Exists(_stateFilePath))
+                    {
+                        File.Delete(_stateFilePath);
+                    }
+                }
+                catch (Exception deleteEx)
+                {
+                    _logger.LogWarning($"[State] Could not delete corrupted state file: {deleteEx.Message}");
                 }
 
                 return new StateData();
